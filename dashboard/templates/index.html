@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MediAgent Demo</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <script src="{{ url_for('static', filename='app.js') }}" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <p class="eyebrow">MEDIAGENT · LIVE SIMULATION</p>
+      <h1>Medication delivery</h1>
+    </div>
+    <button id="trigger-button" class="primary-button">Trigger dose now</button>
+  </header>
+  <main class="panels">
+    <section class="panel robot-panel" aria-labelledby="robot-heading">
+      <h2 id="robot-heading">Robot</h2>
+      <p id="robot-state" class="robot-state">IDLE</p>
+      <p class="battery-label">Battery <strong id="battery">90%</strong></p>
+      <div class="battery-track"><div id="battery-bar"></div></div>
+      <ol id="state-sequence" class="state-sequence">
+        <li data-state="IDLE">IDLE</li>
+        <li data-state="DELIVERING">DELIVERING</li>
+        <li data-state="WAITING_CONFIRM">WAITING CONFIRM</li>
+        <li data-state="RETURNING">RETURNING</li>
+        <li data-state="CHARGING">CHARGING</li>
+      </ol>
+    </section>
+    <section class="panel patient-panel" aria-labelledby="patient-heading">
+      <h2 id="patient-heading">Patient</h2>
+      <p class="medicine-label">Medication</p>
+      <p id="medicine" class="medicine-name">No active dose</p>
+      <div id="reminder" class="reminder" hidden>Time to take your medicine</div>
+      <button id="confirm-button" class="primary-button confirm-button" disabled>
+        Confirm dose taken
+      </button>
+    </section>
+    <section class="panel caregiver-panel" aria-labelledby="caregiver-heading">
+      <h2 id="caregiver-heading">Caregiver</h2>
+      <div class="caregiver-robot-state">
+        Robot state <strong id="caregiver-robot-state">IDLE</strong>
+      </div>
+      <div id="alert-box" class="alert-box" hidden>
+        <strong id="alert-level"></strong>
+        <p id="alert-message"></p>
+      </div>
+      <h3>Patient medication schedule</h3>
+      <ul id="schedule-list" class="schedule-list"></ul>
+      <h3>Live event log</h3>
+      <ol id="event-log" class="event-log" aria-live="polite"></ol>
+    </section>
+  </main>
+  <footer>Software demo only · robot and dispenser are simulated</footer>
+</body>
+</html>
