@@ -1,5 +1,8 @@
+from __future__ import annotations
+
 import json
 import queue
+import threading
 import time
 from typing import Callable
 
@@ -74,6 +77,44 @@ class MqttBus:
                 return
             for callback in self._subscribers.get(topic, []):
                 callback(payload)
+
+
+class Broadcaster:
+    """Thread-safe fan-out of (event, data) pairs to Server-Sent Events clients.
+
+    The main loop calls publish(); each Flask /stream request owns one queue.
+    Slow clients whose queue fills up are dropped rather than blocking the loop.
+    """
+
+    def __init__(self, max_queue: int = 200):
+        self._lock = threading.Lock()
+        self._clients: list[queue.Queue] = []
+        self._max_queue = max_queue
+
+    def subscribe(self) -> queue.Queue:
+        client: queue.Queue = queue.Queue(maxsize=self._max_queue)
+        with self._lock:
+            self._clients.append(client)
+        return client
+
+    def unsubscribe(self, client: queue.Queue) -> None:
+        with self._lock:
+            if client in self._clients:
+                self._clients.remove(client)
+
+    def publish(self, event: str, data) -> None:
+        with self._lock:
+            clients = list(self._clients)
+        for client in clients:
+            try:
+                client.put_nowait((event, data))
+            except queue.Full:
+                self.unsubscribe(client)
+
+    @property
+    def client_count(self) -> int:
+        with self._lock:
+            return len(self._clients)
 
 
 class Context:

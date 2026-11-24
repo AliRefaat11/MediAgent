@@ -1,3 +1,6 @@
+import uuid
+from datetime import datetime
+
 from backend import db
 
 
@@ -12,9 +15,23 @@ ARRIVED = "mediagent/agents/arrived"
 DOSE_DONE = "mediagent/agents/dose_done"
 FAILURE = "mediagent/agents/failure"
 CAREGIVER_ALERT = "mediagent/alert/caregiver"
+# Added: published by the main loop after a schedule row is created, updated
+# or deleted. Payload: {"schedule_id", "action", "medication", "slot",
+# "time_hhmm", "days", "enabled"}.
+SCHEDULE_CHANGED = "mediagent/schedule/changed"
+
+# Reason attached to DOSE_DONE when a pending dose is older than the grace window.
+PAST_GRACE = "past_grace_window"
 
 
 class SchedulingAgent:
+    """Picks due doses, loads them in the dispenser and hands them to the robot.
+
+    A due dose is queued (left pending) while the robot is busy with another
+    delivery. ``robot_unavailable`` is only reported when the robot is
+    offline or its battery is too low for longer than ``max_start_delay``.
+    """
+
     def __init__(self, ctx):
         self.ctx = ctx
         self.current = None
@@ -24,9 +41,14 @@ class SchedulingAgent:
         self.robot_state = None
         self.robot_battery = 0
         self.robot_seen = 0
+        self.in_flight = None
+        self.unavailable_since = None
+        self.generated_for = None
         ctx.bus.subscribe(DISPENSER_STATUS, self.on_dispenser_status)
         ctx.bus.subscribe(ROBOT_STATE, self.on_robot_state)
         ctx.bus.subscribe(FAILURE, self.on_failure)
+        ctx.bus.subscribe(DOSE_DONE, self.on_dose_done)
+        ctx.bus.subscribe(SCHEDULE_CHANGED, self.on_schedule_changed)
 
     def on_robot_state(self, message):
         self.robot_state = message["state"]
@@ -46,11 +68,40 @@ class SchedulingAgent:
         if self.current and message["dose_id"] == self.current["id"]:
             self._clear()
 
+    def on_dose_done(self, message):
+        if message["dose_id"] == self.in_flight:
+            self.in_flight = None
+
+    def on_schedule_changed(self, message):
+        protect = [self.in_flight, self.current["id"] if self.current else None]
+        db.rebuild_schedule_doses(
+            self.ctx.db, message["schedule_id"], self.ctx.clock.now(), protect
+        )
+
     def tick(self, now):
+        self._generate_if_new_day(now)
+        self._expire_stale(now)
+
         if not self.current:
             due = db.get_due_doses(self.ctx.db, now)
             if not due:
+                self.unavailable_since = None
                 return
+            robot = self._robot_status(now)
+            if robot == "busy":
+                # Queue: leave the dose pending until the robot is free.
+                self.unavailable_since = None
+                return
+            if robot != "ready":
+                if self.unavailable_since is None:
+                    self.unavailable_since = now
+                elif now - self.unavailable_since >= self.ctx.config.max_start_delay:
+                    self.unavailable_since = None
+                    self.ctx.bus.publish(
+                        FAILURE, {"dose_id": due[0]["id"], "reason": "robot_unavailable"}
+                    )
+                return
+            self.unavailable_since = None
             self.current = dict(due[0])
             self.retries = 0
             self.start_waiting = None
@@ -61,17 +112,51 @@ class SchedulingAgent:
         if self.start_waiting is None:
             return
 
-        fresh = now - self.robot_seen <= self.ctx.config.robot_timeout
-        available = self.robot_state in ("IDLE", "CHARGING") and fresh
-        if available and self.robot_battery >= self.ctx.config.min_battery:
+        if self._robot_status(now) == "ready":
             dose = self.current
             self.ctx.bus.publish(
                 DOSE_LOADED,
                 {"dose_id": dose["id"], "medication": dose["medication"]},
             )
+            self.in_flight = dose["id"]
             self._clear()
         elif now - self.start_waiting >= self.ctx.config.max_start_delay:
             self._fail("robot_unavailable")
+
+    def _robot_status(self, now):
+        if now - self.robot_seen > self.ctx.config.robot_timeout:
+            return "offline"
+        if self.in_flight is not None or self.robot_state not in ("IDLE", "CHARGING"):
+            return "busy"
+        if self.robot_battery < self.ctx.config.min_battery:
+            return "low_battery"
+        return "ready"
+
+    def _generate_if_new_day(self, now):
+        today = datetime.fromtimestamp(now).date()
+        if today == self.generated_for:
+            return
+        first_run = self.generated_for is None
+        self.generated_for = today
+        # At startup, skip schedule times already older than the grace window so
+        # a late start does not invent stale doses. At midnight every dose of
+        # the new day is in the future anyway.
+        not_before = now - self.ctx.config.missed_grace if first_run else None
+        db.generate_today(self.ctx.db, now, not_before=not_before)
+
+    def _expire_stale(self, now):
+        cutoff = now - self.ctx.config.missed_grace
+        current_id = self.current["id"] if self.current else None
+        for dose in db.get_due_doses(self.ctx.db, cutoff):
+            if dose["id"] in (current_id, self.in_flight):
+                continue
+            # Mark immediately so the dose is not picked up again before the
+            # DOSE_DONE message is persisted by the main loop.
+            db.set_status(self.ctx.db, dose["id"], "missed")
+            self.ctx.bus.publish(
+                DOSE_DONE,
+                {"dose_id": dose["id"], "result": "missed", "reason": PAST_GRACE},
+            )
 
     def _request_load(self, now):
         dose = self.current
@@ -250,53 +335,105 @@ class ReminderAgent:
 
 
 class EscalationAgent:
+    """Publishes caregiver notifications on CAREGIVER_ALERT.
+
+    Every payload has ``id``, ``ts``, ``level`` (info, warning, critical),
+    ``dose_id`` and ``message``; warnings also carry ``reason``. The
+    confirmation deadline starts when the robot *arrives*, so travel time does
+    not eat into the patient's confirmation window.
+    """
+
     def __init__(self, ctx):
         self.ctx = ctx
         self.doses = {}
         ctx.bus.subscribe(DELIVERY_STARTED, self.on_delivery_started)
+        ctx.bus.subscribe(ARRIVED, self.on_arrived)
         ctx.bus.subscribe(DOSE_DONE, self.on_dose_done)
         ctx.bus.subscribe(FAILURE, self.on_failure)
+        ctx.bus.subscribe(SCHEDULE_CHANGED, self.on_schedule_changed)
 
     def on_delivery_started(self, message):
         self.doses[message["dose_id"]] = {
             "medication": message["medication"],
-            "deadline": self.ctx.clock.now() + self.ctx.config.confirm_timeout,
+            "deadline": None,
         }
+        self._notify(
+            "info", message["dose_id"], f"{message['medication']} dispatched to the patient"
+        )
+
+    def on_arrived(self, message):
+        dose_id = message["dose_id"]
+        dose = self.doses.setdefault(
+            dose_id, {"medication": message["medication"], "deadline": None}
+        )
+        dose["deadline"] = self.ctx.clock.now() + self.ctx.config.confirm_timeout
+        self._notify(
+            "info", dose_id, f"{dose['medication']} arrived; waiting for the patient to confirm"
+        )
 
     def on_dose_done(self, message):
-        self.doses.pop(message["dose_id"], None)
+        dose_id = message["dose_id"]
+        dose = self.doses.pop(dose_id, None)
+        if message["result"] == "taken":
+            medication = dose["medication"] if dose else self._medication(dose_id)
+            self._notify("info", dose_id, f"{medication} taken by the patient")
+        elif message["result"] == "missed" and message.get("reason") == PAST_GRACE:
+            medication = dose["medication"] if dose else self._medication(dose_id)
+            self._notify(
+                "critical",
+                dose_id,
+                f"Dose of {medication} was missed: it was not delivered before the grace window ended",
+                reason=PAST_GRACE,
+            )
 
     def on_failure(self, message):
         dose = self.doses.pop(message["dose_id"], None)
         medication = dose["medication"] if dose else self._medication(message["dose_id"])
-        self.ctx.bus.publish(
-            CAREGIVER_ALERT,
-            {
-                "dose_id": message["dose_id"],
-                "level": "warning",
-                "message": f"{medication} delivery failed: {message['reason']}",
-            },
+        self._notify(
+            "warning",
+            message["dose_id"],
+            f"{medication} delivery failed: {message['reason']}",
+            reason=message["reason"],
         )
         self.ctx.bus.publish(
             DOSE_DONE, {"dose_id": message["dose_id"], "result": "failed"}
         )
 
+    def on_schedule_changed(self, message):
+        action = message.get("action", "updated")
+        medication = message.get("medication") or "Medication"
+        time_hhmm = message.get("time_hhmm")
+        detail = f" at {time_hhmm}" if time_hhmm else ""
+        if action == "updated" and message.get("enabled") is False:
+            action = "updated (disabled)"
+        self._notify("info", None, f"Schedule {action}: {medication}{detail}")
+
     def tick(self, now):
         for dose_id, dose in list(self.doses.items()):
-            if now < dose["deadline"]:
+            if dose["deadline"] is None or now < dose["deadline"]:
                 continue
             self.doses.pop(dose_id)
-            self.ctx.bus.publish(
-                CAREGIVER_ALERT,
-                {
-                    "dose_id": dose_id,
-                    "level": "critical",
-                    "message": f"Dose of {dose['medication']} was not confirmed",
-                },
+            self._notify(
+                "critical",
+                dose_id,
+                f"Dose of {dose['medication']} was not confirmed",
+                reason="not_confirmed",
             )
             self.ctx.bus.publish(
                 DOSE_DONE, {"dose_id": dose_id, "result": "missed"}
             )
+
+    def _notify(self, level, dose_id, message, reason=None):
+        payload = {
+            "id": uuid.uuid4().hex,
+            "ts": self.ctx.clock.now(),
+            "level": level,
+            "dose_id": dose_id,
+            "message": message,
+        }
+        if reason:
+            payload["reason"] = reason
+        self.ctx.bus.publish(CAREGIVER_ALERT, payload)
 
     def _medication(self, dose_id):
         dose = db.get_dose(self.ctx.db, dose_id)
