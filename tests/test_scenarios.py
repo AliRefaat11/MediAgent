@@ -10,7 +10,7 @@ from pathlib import Path
 from backend import db
 from backend.agents import (
     ARRIVED,
-    CAREGIVER_ALERT,
+    NOTIFY_CAREGIVER,
     DELIVERY_STARTED,
     ROBOT_COMMAND,
     SCHEDULE_CHANGED,
@@ -74,7 +74,7 @@ class RuntimeTestCase(unittest.TestCase):
         self.alerts = []
         self.commands = []
         self.messages = []
-        runtime.bus.subscribe(CAREGIVER_ALERT, self.alerts.append)
+        runtime.bus.subscribe(NOTIFY_CAREGIVER, self.alerts.append)
         runtime.bus.subscribe(ROBOT_COMMAND, self.commands.append)
         for topic in (DELIVERY_STARTED, ARRIVED):
             runtime.bus.subscribe(
@@ -183,9 +183,9 @@ class AgentFixTests(RuntimeTestCase):
         self.assertIn("arrived", messages)
         self.assertIn("taken", messages)
         for alert in self.alerts:
-            for field in ("id", "ts", "level", "dose_id", "message"):
+            for field in ("v", "msg_id", "source", "notification_id", "ts", "level", "dose_id", "message"):
                 self.assertIn(field, alert)
-        self.assertEqual(len({a["id"] for a in self.alerts}), len(self.alerts))
+        self.assertEqual(len({a["notification_id"] for a in self.alerts}), len(self.alerts))
         stored = db.recent_notifications(connection)
         self.assertEqual(len(stored), len(self.alerts))
 
@@ -399,11 +399,11 @@ class ScheduleCommandTests(RuntimeTestCase):
         runtime.step(self.clock.now())
         warning = next(a for a in self.alerts if a["level"] == "warning")
         self.assertEqual(warning["reason"], "load_failed")
-        result = self.command(runtime, type="ack_notification", id=warning["id"])
+        result = self.command(runtime, type="ack_notification", id=warning["notification_id"])
         self.assertEqual(result["status"], 200)
-        row = connection.execute("SELECT acked FROM notifications WHERE id = ?", (warning["id"],)).fetchone()
+        row = connection.execute("SELECT acked FROM notifications WHERE id = ?", (warning["notification_id"],)).fetchone()
         self.assertEqual(row["acked"], 1)
-        snap = next(n for n in runtime.snapshot["notifications"] if n["id"] == warning["id"])
+        snap = next(n for n in runtime.snapshot["notifications"] if n["id"] == warning["notification_id"])
         self.assertTrue(snap["acked"])
         self.assertEqual(self.command(runtime, type="ack_notification", id="nope")["status"], 404)
 

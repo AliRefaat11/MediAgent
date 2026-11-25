@@ -38,6 +38,7 @@
     <li data-state="WAITING_CONFIRM"><span class="route-dot" aria-hidden="true"></span>Waiting for confirmation</li>
     <li data-state="RETURNING"><span class="route-dot" aria-hidden="true"></span>Returning</li>
     <li data-state="CHARGING"><span class="route-dot" aria-hidden="true"></span>Charging</li>
+    <li data-state="EMERGENCY_STOP"><span class="route-dot" aria-hidden="true"></span>Emergency stop</li>
   </ol>
 </section>
 
@@ -47,6 +48,20 @@
     <p class="muted">Start a one-off dose of Aspirin 100mg from slot 1 right now.</p>
     <button class="btn btn-primary js-trigger" type="button">{{ icon("play") }} <span>Trigger dose now</span></button>
     <p class="form-status js-trigger-status" role="status"></p>
+    <p class="muted">Simulated hardware: the same actions the real sensors and buttons will cause.</p>
+    <div class="sim-buttons">
+      <button class="btn btn-ghost btn-small js-sim" type="button" data-device="robot" data-action="open_lid">Open tray lid</button>
+      <button class="btn btn-ghost btn-small js-sim" type="button" data-device="robot" data-action="estop">Emergency stop</button>
+      <button class="btn btn-ghost btn-small js-sim" type="button" data-device="robot" data-action="release_estop">Release e-stop</button>
+      <button class="btn btn-ghost btn-small js-sim" type="button" data-device="robot" data-action="lost_line">Lose the line</button>
+      <button class="btn btn-ghost btn-small js-sim" type="button" data-device="robot" data-action="set_battery" data-value="20">Battery 20%</button>
+      <button class="btn btn-ghost btn-small js-sim" type="button" data-device="robot" data-action="set_battery" data-value="90">Battery 90%</button>
+      <button class="btn btn-ghost btn-small js-sim" type="button" data-device="robot" data-action="heartbeat_off">Cut robot heartbeat</button>
+      <button class="btn btn-ghost btn-small js-sim" type="button" data-device="robot" data-action="heartbeat_on">Restore robot heartbeat</button>
+      <button class="btn btn-ghost btn-small js-sim" type="button" data-device="dispenser" data-action="heartbeat_off">Cut dispenser heartbeat</button>
+      <button class="btn btn-ghost btn-small js-sim" type="button" data-device="dispenser" data-action="heartbeat_on">Restore dispenser heartbeat</button>
+    </div>
+    <p class="form-status js-sim-status" role="status"></p>
   </section>
   <section class="card" aria-labelledby="log-h">
     <h2 id="log-h" class="card-title">{{ icon("list") }} Activity log</h2>

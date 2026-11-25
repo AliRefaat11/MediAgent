@@ -1,7 +1,7 @@
 # MediAgent Demo
 A multi-agent medication dispensing and delivery demo with a caregiver dashboard.
 The dispenser and robot are **SIMULATED**; nothing was tested on real hardware.
-`MqttBus` is included but **UNTESTED with a real broker**.
+`MqttBus` has been tested against a local Mosquitto broker (full delivery cycle and Last Will), not yet with the ESP32 firmware.
 
 ## Install and run
 Requires Python 3.10+.
@@ -12,7 +12,17 @@ Open http://localhost:5000.
 Add a daily schedule at startup with `--add-schedule 08:00:Aspirin:1`. This is idempotent: running it again does not create a duplicate row.
 
 Scenario 1: on the Caregiver or Robot page click **Send a test dose** / **Trigger dose now**, then on the Patient page press **I took my medicine** when prompted.
-Scenario 2: trigger a dose and do nothing. Reminders repeat, then a critical caregiver notification appears.
+Scenario 2: trigger a dose and do nothing. Reminders repeat, then a critical caregiver notification appears and repeats until it is acknowledged.
+Scenario 3: on the Robot page use the simulation buttons (open tray lid, emergency stop, lose the line, low battery, cut a heartbeat) to see each failure path.
+
+### Run modes
+| Command | What runs |
+| --- | --- |
+| `backend/main.py` (or `--sim`) | Agents and simulated devices in one process on the in-memory `LocalBus` |
+| `backend/main.py --mqtt --sim` | Agents on MQTT; the simulated dispenser and robot run in the same process but each has its own MQTT connection and Last Will |
+| `backend/main.py --mqtt` plus `python -m backend.simulator --mqtt` | Agents and devices in separate processes, exactly like the real ESP32s |
+
+`--mqtt` needs a broker (for example `mosquitto -p 1883`); use `--host` and `--mqtt-port` to point at it. `--confirm-method lid` makes the simulated patient open the tray lid instead of pressing the button.
 
 ## Pages
 Open http://localhost:5000 and pick a view from the top navigation. Each page can run on its own device:
@@ -61,7 +71,40 @@ Notification toasts, sound and desktop alerts appear only on the caregiver page.
 
 Invalid input returns `400` with `{"errors": {field: message}}`, and an unknown id returns `404`. Flask never writes the database. Writes go to the main loop through `control_queue` (a single DB writer), which then publishes `mediagent/schedule/changed` on the bus.
 
-Bus additions (existing topics and fields are unchanged): `mediagent/schedule/changed`. `mediagent/alert/caregiver` payloads now also carry `id`, `ts` and optional `reason`, and the `info` level is used. `mediagent/agents/dose_done` may carry `reason: "past_grace_window"`.
+`POST /sim/<device>/<action>` drives the simulated hardware (`robot`: `press_button`, `open_lid`, `estop`, `release_estop`, `lost_line`, `set_battery` with `{"value": 20}`, `heartbeat_off`, `heartbeat_on`, `power_off`, `power_on`; `dispenser`: `heartbeat_off`, `heartbeat_on`, `power_off`, `power_on`, `refill` with `{"slot": 1, "count": 20}`).
+
+## Agents
+| Agent | Type | Does |
+| --- | --- | --- |
+| Scheduling | Goal-based, with internal state | Turns schedules into dated doses (startup, midnight, after each `schedule/changed`), expires doses past the grace window, commands the dispenser, confirms the load with retries, releases the dose only when the robot is ready |
+| Delivery | Model-based reflex (FSM: IDLE, DISPATCHING, EN_ROUTE, AT_PATIENT, RETURNING) | Drives the robot to the patient, reacts to obstacle, lost line, battery, e-stop and heartbeat loss, sends it home |
+| Reminder | Simple reflex plus timers | Alerts on arrival, repeats every interval up to N times, stops on confirmation (button or tray lid) |
+| Escalation & Notification | Utility/rule-based | Picks the level (info, warning, critical), notifies the caregiver, repeats criticals until acknowledged, closes doses as taken, missed or failed, watches device heartbeats |
+
+The agents never call each other; they only publish and subscribe. All topics, QoS/retain rules, reasons and the envelope live in `backend/protocol.py`.
+
+## Message protocol
+Every message is JSON with the envelope `{"v": 1, "msg_id": "<uuid>", "ts": <seconds>, "source": "delivery_agent", "dose_id": 42, ...payload}`. `dose_id` is the correlation id (`null` when a message is not about a dose) and hardware replies must echo it. The bus drops any `msg_id` it has already delivered, so QoS 1 redeliveries are harmless.
+
+| Topic (prefix `mediagent/`) | From → to | QoS | Retained |
+| --- | --- | --- | --- |
+| `dispenser/command` `{"action": "load", "slot", "medication", "attempt"}` | Scheduling → dispenser | 1 | no |
+| `dispenser/status` `{"loaded", "attempt", "error"?}` | dispenser → Scheduling | 1 | no |
+| `dispenser/state` `{"online", "state": IDLE/LOADING/ERROR, "slots": {"1": 20}}` | dispenser → Scheduling, Escalation | 0 | yes, Last Will `OFFLINE` |
+| `robot/command` `{"action": deliver/return/alert/stop}` | Delivery, Reminder → robot | 1 | no |
+| `robot/event` `{"event": arrived/confirmed/obstacle/path_clear/lost_line/docked/emergency_stop}`; `confirmed` has `"method": "button"` or `"lid"` | robot → Delivery, Reminder | 1 | no |
+| `robot/state` `{"online", "state", "battery", "lid_open", "dose_id"}` about every 1 s | robot → Scheduling, Delivery, Escalation, dashboard | 0 | yes, Last Will `OFFLINE` |
+| `agents/dose_loaded`, `agents/delivery_started`, `agents/arrived` | agent → agent | 1 | no |
+| `agents/dose_done` `{"result": taken/missed/failed, "reason"?, "method"?}` | Reminder or Escalation → all | 1 | no |
+| `agents/failure` `{"reason"}` | Scheduling or Delivery → Escalation, Delivery | 1 | no |
+| `schedule/changed` | main loop (dashboard API) → Scheduling, Escalation | 1 | no |
+| `notify/caregiver` `{"notification_id", "level", "message", "reason", "requires_ack", "repeat"}` | Escalation → dashboard | 1 | no |
+| `caregiver/ack` `{"notification_id"}` | dashboard → Escalation | 1 | no |
+| `sim/control` `{"device", "action"}` | dashboard → simulators only | 1 | no |
+
+Failure reasons: `load_failed`, `slot_empty`, `dispenser_offline`, `robot_unavailable`, `robot_offline`, `path_blocked`, `lost_line`, `low_battery`, `delivery_timeout`, `emergency_stop`. After `lost_line` or `emergency_stop` the robot is told to stop (not to drive home), because it cannot navigate safely; after the other failures it returns to the dock.
+
+Notification levels: `info` (dispatched, arrived, taken, schedule changed, device back online; no ack), `warning` (delivery or load failed, device offline, emergency stop; needs ack), `critical` (not confirmed before the deadline, or missed because of the grace window; needs ack and is re-sent every `critical_repeat_interval` with the same `notification_id` and a higher `repeat` until acknowledged).
 
 Existing database files are migrated automatically: `enabled` and `days` columns are added to `schedules`, and a `notifications` table is created.
 
@@ -69,7 +112,7 @@ Existing database files are migrated automatically: `enabled` and `days` columns
 From the project root:
 
 ```
-.venv/bin/python -m unittest tests.test_scenarios -v
+.venv/bin/python -m pytest -q
 ```
 
-(Windows: `.venv\Scripts\python -m unittest tests.test_scenarios -v`.) The scenario tests drive the runtime with a manual clock, so they are deterministic and finish in about a second.
+(Windows: `.venv\Scripts\python -m pytest -q`.) The tests drive the runtime with a manual clock, so they are deterministic and finish in a few seconds. `tests/test_protocol.py` covers the envelope, duplicate dropping, retained state, the tray lid, the dispenser LOADING state and every failure path (load retries, empty slot, robot offline with Last Will, low battery before and during delivery, obstacles, delivery timeout, lost line, emergency stop and recovery, heartbeat loss, dispenser offline) plus critical repeats until acknowledgement. Two tests need an MQTT broker on `localhost:1883` and are skipped without one.

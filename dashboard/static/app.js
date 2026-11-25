@@ -17,6 +17,10 @@ const REASONS = {
   robot_unavailable: "Robot unavailable",
   not_confirmed: "Patient did not confirm in time",
   past_grace_window: "Not delivered before the grace window ended",
+  slot_empty: "Dispenser slot is empty",
+  dispenser_offline: "Dispenser offline",
+  robot_offline: "Robot offline (no heartbeat)",
+  emergency_stop: "Emergency stop pressed",
 };
 const DAY_LABEL = { mon: "Mon", tue: "Tue", wed: "Wed", thu: "Thu", fri: "Fri", sat: "Sat", sun: "Sun" };
 const ROBOT_LABEL = {
@@ -25,6 +29,8 @@ const ROBOT_LABEL = {
   WAITING_CONFIRM: "With patient",
   RETURNING: "Returning",
   CHARGING: "Charging",
+  EMERGENCY_STOP: "Emergency stop",
+  OFFLINE: "Offline",
 };
 const ROBOT_TEXT = {
   IDLE: "Waiting at the dock",
@@ -32,6 +38,8 @@ const ROBOT_TEXT = {
   WAITING_CONFIRM: "With the patient, waiting for confirmation",
   RETURNING: "Heading back to the dock",
   CHARGING: "Charging at the dock",
+  EMERGENCY_STOP: "Stopped. Release the emergency stop to continue",
+  OFFLINE: "No heartbeat from the robot",
 };
 
 // Delivery cycle stages reported by the backend -> stepper position.
@@ -49,7 +57,7 @@ const STAGES = {
   charging: { label: "Charging", step: 4 },
   complete: { label: "Cycle complete", step: 5 },
 };
-const FAILED_AT_DUE = new Set(["load_failed", "robot_unavailable"]);
+const FAILED_AT_DUE = new Set(["load_failed", "robot_unavailable", "slot_empty", "dispenser_offline"]);
 
 const known = new Map(); // notification id -> notification
 let notificationsReady = false;
@@ -309,6 +317,12 @@ function ingestNotifications(list) {
     if (!previous) {
       known.set(notification.id, notification);
       changed = true;
+      if (notificationsReady) announce(notification);
+    } else if ((notification.repeat ?? 0) > (previous.repeat ?? 0) && !previous.acked) {
+      // An unacknowledged critical alert repeats until someone acknowledges it.
+      known.set(notification.id, { ...previous, ...notification });
+      changed = true;
+      document.getElementById(`toast-${notification.id}`)?.remove();
       if (notificationsReady) announce(notification);
     } else if (previous.acked !== notification.acked) {
       known.set(notification.id, { ...previous, ...notification });
@@ -909,6 +923,24 @@ function initControls() {
         setTimeout(() => {
           button.disabled = false;
         }, 1500);
+      }
+    });
+  });
+
+  $$(".js-sim").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const { device, action, value } = button.dataset;
+      const options = { method: "POST" };
+      if (value !== undefined) {
+        options.headers = { "Content-Type": "application/json" };
+        options.body = JSON.stringify({ value: Number(value) });
+      }
+      try {
+        await api(`/sim/${device}/${action}`, options);
+        $$(".js-sim-status").forEach((node) => setText(node, `Sent: ${button.textContent.trim()}`));
+      } catch (error) {
+        $$(".js-sim-status").forEach((node) => setText(node, "Could not reach the simulator."));
+        console.error(error);
       }
     });
   });

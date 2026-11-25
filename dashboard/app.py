@@ -187,6 +187,14 @@ def create_app(
         control_queue.put("confirm")
         return jsonify({"ok": True})
 
+    @app.post("/sim/<device>/<action>")
+    def sim_control(device, action):
+        """Simulation buttons: press_button, open_lid, estop, release_estop,
+        lost_line, heartbeat_off/on, power_off/on, set_battery, refill."""
+        body = request.get_json(silent=True) or {}
+        extra = {k: body[k] for k in ("value", "slot", "count") if k in body}
+        return send_command({"type": "sim", "device": device, "action": action, **extra})
+
     return app
 
 def _sse(event, data):

@@ -13,29 +13,38 @@ import traceback
 import uuid
 
 from backend import db
-from backend.agents import (
+from backend.agents import DeliveryAgent, EscalationAgent, ReminderAgent, SchedulingAgent
+from backend.core import Broadcaster, Context, Endpoint, LocalBus
+from backend.protocol import (
     ARRIVED,
-    CAREGIVER_ALERT,
+    CAREGIVER_ACK,
+    DASHBOARD,
     DELIVERY_STARTED,
     DISPENSER_COMMAND,
+    DISPENSER_STATE,
+    DISPENSER_STATUS,
     DOSE_DONE,
     DOSE_LOADED,
     FAILURE,
+    NOTIFY_CAREGIVER,
     PAST_GRACE,
     ROBOT_COMMAND,
     ROBOT_EVENT,
     ROBOT_STATE,
     SCHEDULE_CHANGED,
-    DeliveryAgent,
-    EscalationAgent,
-    ReminderAgent,
-    SchedulingAgent,
+    SIM_CONTROL,
 )
-from backend.core import Broadcaster, Context, LocalBus
-from backend.simulator import DispenserSim, RobotSim
+from backend.simulator import SimDevices
 from backend.validation import ValidationError, validate_schedule
 
 NOTIFICATION_LIMIT = 50
+HEARTBEAT_TOPICS = (ROBOT_STATE, DISPENSER_STATE)
+SIM_ACTIONS = {
+    "robot": {"press_button", "open_lid", "estop", "release_estop", "lost_line",
+              "heartbeat_off", "heartbeat_on", "power_off", "power_on", "set_battery"},
+    "dispenser": {"heartbeat_off", "heartbeat_on", "power_off", "power_on", "refill",
+                  "set_fail_prob"},
+}
 ACTIVE_STAGES = ("loading", "delivering", "arrived", "waiting", "taken", "missed", "returning", "charging")
 
 
@@ -54,8 +63,13 @@ class Runtime:
         load_fail_prob=0.0,
         travel_time=20.0,
         seed=None,
+        confirm_method="button",
+        devices=None,
         verbose=False,
     ):
+        """``devices``: None runs the simulated dispenser and robot on this
+        bus; a ``SimDevices`` instance is stepped as given (e.g. with its own
+        MQTT connections); False means real or external devices."""
         self.connection = connection
         self.clock = clock
         self.bus = bus or LocalBus()
@@ -71,19 +85,24 @@ class Runtime:
             EscalationAgent(self.ctx),
         ]
         self.scheduler = self.agents[0]
-        self.dispenser = DispenserSim(self.ctx, load_fail_prob, seed=seed)
-        self.robot = RobotSim(
-            self.ctx,
-            confirm_prob=confirm_prob,
-            obstacle_prob=obstacle_prob,
-            obstacle_s=obstacle_s,
-            travel_time=travel_time,
-            seed=seed,
-        )
+        self.escalation = self.agents[3]
+        self.out = Endpoint(self.bus, clock, DASHBOARD)
+        if devices is None:
+            devices = SimDevices(
+                self.bus, self.bus, clock,
+                load_fail_prob=load_fail_prob, confirm_prob=confirm_prob,
+                obstacle_prob=obstacle_prob, obstacle_s=obstacle_s,
+                travel_time=travel_time, seed=seed, confirm_method=confirm_method,
+            )
+        self.devices = devices or None
+        self.dispenser = self.devices.dispenser if self.devices else None
+        self.robot = self.devices.robot if self.devices else None
+        self._robot_seen = None
         notifications = db.recent_notifications(connection, NOTIFICATION_LIMIT)
         self.snapshot = {
             "robot_state": "IDLE",
             "battery": 90.0,
+            "dispenser": {"state": "UNKNOWN", "online": False, "slots": {}},
             "active_dose": None,
             "alert_on": False,
             "alert_text": "",
@@ -98,15 +117,19 @@ class Runtime:
         self._last_broadcast_wall = 0.0
         self._last_refresh = None
         self._pending_replies = []
+        self._started = clock.now()
 
         for topic in (
             DISPENSER_COMMAND,
+            DISPENSER_STATUS,
+            DISPENSER_STATE,
             DOSE_LOADED,
             DELIVERY_STARTED,
             ARRIVED,
             DOSE_DONE,
             FAILURE,
-            CAREGIVER_ALERT,
+            NOTIFY_CAREGIVER,
+            CAREGIVER_ACK,
             ROBOT_STATE,
             ROBOT_COMMAND,
             ROBOT_EVENT,
@@ -124,8 +147,9 @@ class Runtime:
         self.bus.pump()
         for agent in self.agents:
             agent.tick(now)
-        self.dispenser.tick(now)
-        self.robot.tick(now)
+        if self.devices:
+            # Devices sharing our bus were already pumped above.
+            self.devices.step(now, pump=self.devices.buses != [self.bus])
         self._drain_control(now)
         self.bus.pump()
         self._refresh(now)
@@ -157,6 +181,13 @@ class Runtime:
             "next_dose": dict(upcoming) if upcoming else None,
             "now": now,
         }
+        timeout = self.config.robot_timeout
+        if self._robot_seen is None or now - self._robot_seen > timeout:
+            if self.snapshot["robot_state"] != "OFFLINE" and (self._robot_seen is not None or now - self._started > timeout):
+                changes["robot_state"] = "OFFLINE"
+        dispenser_watch = self.scheduler.dispenser
+        if self.snapshot["dispenser"]["online"] and not dispenser_watch.online(now):
+            changes["dispenser"] = {**self.snapshot["dispenser"], "online": False, "state": "OFFLINE"}
         cycle = self.snapshot["cycle"]
         if due and (cycle is None or cycle["stage"] not in ACTIVE_STAGES):
             first = due[0]
@@ -216,7 +247,12 @@ class Runtime:
         kind = topic.rsplit("/", 1)[-1]
 
         if topic != DISPENSER_COMMAND:
-            state_changed = topic != ROBOT_STATE or payload["state"] != self.snapshot["robot_state"]
+            if topic == ROBOT_STATE:
+                state_changed = payload.get("state") != self.snapshot["robot_state"]
+            elif topic == DISPENSER_STATE:
+                state_changed = payload.get("state") != self.snapshot["dispenser"]["state"]
+            else:
+                state_changed = True
             if state_changed:
                 db.log_event(self.connection, now, dose_id, kind, json.dumps(payload))
                 if self.verbose:
@@ -238,15 +274,26 @@ class Runtime:
             self._cycle(dose_id, now, stage="failed", result="failed", reason=payload.get("reason"))
         elif topic == DOSE_DONE:
             self._on_dose_done(payload, now)
-        elif topic == CAREGIVER_ALERT:
+        elif topic == NOTIFY_CAREGIVER:
             self._on_notification(payload, now)
+        elif topic == CAREGIVER_ACK:
+            self._on_ack(payload, now)
         elif topic == ROBOT_STATE:
-            self._replace(robot_state=payload["state"], battery=payload["battery"])
-            self._advance_return(payload["state"], now)
+            state = payload.get("state", "OFFLINE")
+            if state != "OFFLINE":
+                self._robot_seen = now
+            self._replace(robot_state=state, battery=payload.get("battery", self.snapshot["battery"]))
+            self._advance_return(state, now)
+        elif topic == DISPENSER_STATE:
+            self._replace(dispenser={
+                "state": payload.get("state", "OFFLINE"),
+                "online": payload.get("online", True) is not False and payload.get("state") != "OFFLINE",
+                "slots": payload.get("slots", self.snapshot["dispenser"].get("slots", {})),
+            })
         elif topic == ROBOT_COMMAND and payload.get("action") == "alert":
-            self._replace(alert_on=payload["on"], alert_text=payload.get("text", ""))
+            self._replace(alert_on=bool(payload.get("on")), alert_text=payload.get("text", ""))
             cycle = self.snapshot["cycle"]
-            if payload["on"] and cycle and cycle["dose_id"] == dose_id and cycle["stage"] in ("arrived", "waiting"):
+            if payload.get("on") and cycle and cycle["dose_id"] == dose_id and cycle["stage"] in ("arrived", "waiting"):
                 self._cycle(dose_id, now, stage="waiting")
         elif topic == SCHEDULE_CHANGED:
             self.broadcaster.publish("schedules", payload)
@@ -266,7 +313,7 @@ class Runtime:
             elif result == "missed":
                 self._cycle(dose_id, now, stage="missed", result="missed", reason="not_confirmed")
             elif cycle is None or cycle["dose_id"] != dose_id or cycle["result"] is None:
-                self._cycle(dose_id, now, stage="failed", result="failed")
+                self._cycle(dose_id, now, stage="failed", result="failed", reason=payload.get("reason"))
         self.broadcaster.publish("doses", {"dose_id": dose_id})
 
     def _advance_return(self, robot_state, now):
@@ -282,8 +329,20 @@ class Runtime:
             self._cycle(cycle["dose_id"], now, stage="complete")
 
     def _on_notification(self, payload, now):
+        notification_id = str(payload.get("notification_id") or payload.get("id") or uuid.uuid4().hex)
+        repeat = int(payload.get("repeat") or 0)
+        if repeat:
+            # A critical that is still unacknowledged: same id, announce again.
+            existing = next((n for n in self.snapshot["notifications"] if n["id"] == notification_id), None)
+            if existing is not None and not existing["acked"]:
+                updated = {**existing, "repeat": repeat}
+                self._replace(notifications=[
+                    updated if n["id"] == notification_id else n for n in self.snapshot["notifications"]
+                ])
+                self.broadcaster.publish("notification", updated)
+            return
         notification = {
-            "id": str(payload.get("id") or uuid.uuid4().hex),
+            "id": notification_id,
             "ts": payload.get("ts", now),
             "level": payload.get("level", "info"),
             "dose_id": payload.get("dose_id"),
@@ -291,15 +350,27 @@ class Runtime:
             "reason": payload.get("reason"),
             "acked": False,
             "acked_ts": None,
+            "repeat": 0,
         }
         db.save_notification(self.connection, notification)
         notifications = [notification, *self.snapshot["notifications"]][:NOTIFICATION_LIMIT]
         changes = {"notifications": notifications}
         if notification["level"] != "info":
             # Backward-compatible list of warning/critical alerts.
-            changes["alerts"] = [*self.snapshot["alerts"], payload][-20:]
+            changes["alerts"] = [*self.snapshot["alerts"], notification][-20:]
         self._replace(**changes)
         self.broadcaster.publish("notification", notification)
+
+    def _on_ack(self, payload, now):
+        notification_id = str(payload.get("notification_id"))
+        if not db.ack_notification(self.connection, notification_id, now):
+            return
+        notifications = [
+            {**n, "acked": True, "acked_ts": n.get("acked_ts") or now} if n["id"] == notification_id else n
+            for n in self.snapshot["notifications"]
+        ]
+        self._replace(notifications=notifications)
+        self.broadcaster.publish("ack", {"id": notification_id})
 
     # ---------------------------------------------------- control commands
 
@@ -314,8 +385,8 @@ class Runtime:
                 self.broadcaster.publish("doses", {})
                 continue
             if command == "confirm":
-                if self.robot.state == "WAITING_CONFIRM":
-                    self.robot.press_confirm()
+                # The patient page's button stands in for the robot's button.
+                self.out.send(SIM_CONTROL, {"device": "robot", "action": "press_button"})
                 continue
             if not isinstance(command, dict):
                 continue
@@ -358,19 +429,25 @@ class Runtime:
             return {"ok": True, "status": 200, "schedule": schedule}
         if kind == "ack_notification":
             notification_id = str(command["id"])
-            if not db.ack_notification(self.connection, notification_id, now):
+            row = self.connection.execute(
+                "SELECT dose_id FROM notifications WHERE id = ?", (notification_id,)
+            ).fetchone()
+            if row is None:
                 return {"ok": False, "status": 404, "errors": {"id": "notification not found"}}
-            notifications = [
-                {**n, "acked": True, "acked_ts": n.get("acked_ts") or now} if n["id"] == notification_id else n
-                for n in self.snapshot["notifications"]
-            ]
-            self._replace(notifications=notifications)
-            self.broadcaster.publish("ack", {"id": notification_id})
+            # Escalation stops repeating it; the recorder (_on_ack) writes the DB.
+            self.out.send(CAREGIVER_ACK, {"notification_id": notification_id}, row["dose_id"])
             return {"ok": True, "status": 200, "id": notification_id}
+        if kind == "sim":
+            device, action = command.get("device"), command.get("action")
+            if action not in SIM_ACTIONS.get(device, ()):
+                return {"ok": False, "status": 400, "errors": {"action": f"unknown action {device}/{action}"}}
+            extra = {k: command[k] for k in ("value", "slot", "count") if k in command}
+            self.out.send(SIM_CONTROL, {"device": device, "action": action, **extra})
+            return {"ok": True, "status": 200}
         return {"ok": False, "status": 400, "errors": {"type": f"unknown command {kind!r}"}}
 
     def _schedule_changed(self, action, schedule):
-        self.bus.publish(
+        self.out.send(
             SCHEDULE_CHANGED,
             {
                 "schedule_id": schedule["id"],

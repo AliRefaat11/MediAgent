@@ -11,6 +11,7 @@ from backend import db
 from backend.config import Config, demo_config
 from backend.core import Broadcaster, Clock, LocalBus, MqttBus
 from backend.runtime import Runtime
+from backend.simulator import SimDevices
 from backend.validation import ValidationError, validate_schedule
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -38,8 +39,19 @@ def parse_args(argv=None):
     parser.add_argument("--obstacle-prob", type=float, default=0)
     parser.add_argument("--obstacle-s", type=float, default=6)
     parser.add_argument("--load-fail-prob", type=float, default=0)
-    parser.add_argument("--mqtt", action="store_true")
+    parser.add_argument(
+        "--sim", action="store_true",
+        help="run the simulated dispenser and robot in this process "
+             "(always on without --mqtt; with --mqtt each device gets its own connection and Last Will)",
+    )
+    parser.add_argument(
+        "--mqtt", action="store_true",
+        help="use an MQTT broker; without --sim the devices must be real ESP32s "
+             "or `python -m backend.simulator --mqtt`",
+    )
     parser.add_argument("--host", default="localhost")
+    parser.add_argument("--mqtt-port", type=int, default=1883)
+    parser.add_argument("--confirm-method", choices=("button", "lid"), default="button")
     parser.add_argument("--add-schedule", type=parse_schedule)
     parser.add_argument("--dashboard", action="store_true")
     parser.add_argument("--port", type=int, default=5000)
@@ -58,8 +70,22 @@ def run(argv=None):
     args = parse_args(argv)
     speed = args.speed if args.speed is not None else (5 if args.dashboard else 1)
     config = demo_config() if args.dashboard else Config()
-    bus = MqttBus(args.host) if args.mqtt else LocalBus()
     clock = Clock(speed)
+    bus = MqttBus(args.host, args.mqtt_port, client_id="mediagent-agents") if args.mqtt else LocalBus()
+    sim_kwargs = dict(
+        confirm_prob=0 if args.dashboard else args.confirm_prob,
+        obstacle_prob=args.obstacle_prob,
+        obstacle_s=args.obstacle_s,
+        load_fail_prob=args.load_fail_prob,
+        confirm_method=args.confirm_method,
+    )
+    if not args.mqtt:
+        devices = None  # simulated devices on the in-process LocalBus
+    elif args.sim:
+        devices = SimDevices.over_mqtt(args.host, args.mqtt_port, clock, **sim_kwargs)
+    else:
+        devices = False
+        print("Waiting for devices on MQTT (real hardware or `python -m backend.simulator --mqtt`)")
     connection = db.init_db(args.db)
 
     # Startup writes happen before the dashboard thread exists, so the main
@@ -82,11 +108,9 @@ def run(argv=None):
         clock,
         bus,
         broadcaster=broadcaster,
-        confirm_prob=0 if args.dashboard else args.confirm_prob,
-        obstacle_prob=args.obstacle_prob,
-        obstacle_s=args.obstacle_s,
-        load_fail_prob=args.load_fail_prob,
+        devices=devices,
         verbose=True,
+        **sim_kwargs,
     )
 
     if args.dashboard:
@@ -112,6 +136,10 @@ def run(argv=None):
     except KeyboardInterrupt:
         print("MediAgent stopped.")
     finally:
+        if runtime.devices:
+            runtime.devices.close(clock)
+        if isinstance(bus, MqttBus):
+            bus.close()
         connection.close()
 
 if __name__ == "__main__":

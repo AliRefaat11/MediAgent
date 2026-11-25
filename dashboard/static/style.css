@@ -357,3 +357,10 @@ input[aria-invalid="true"], fieldset[aria-invalid="true"] { border-color: var(--
 }
 /* The "N critical alerts" toast only points at the popup, so hide it while the popup is open. */
 .notif-open #toast-backlog { display: none; }
+
+.sim-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
