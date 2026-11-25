@@ -1,0 +1,159 @@
+{% extends "base.html" %}
+{% from "_icons.html" import icon %}
+{% block title %}Caregiver{% endblock %}
+{% block content %}
+<!-- Toasts: polite for info, assertive for warning/critical. -->
+<div class="toasts" aria-label="Notifications">
+  <div id="toast-assertive" aria-live="assertive" aria-atomic="false"></div>
+  <div id="toast-polite" aria-live="polite" aria-atomic="false"></div>
+</div>
+
+<div class="page-head with-actions">
+  <div>
+    <h1>Caregiver dashboard</h1>
+    <p class="lead">Follow deliveries, respond to alerts and manage medication schedules.</p>
+  </div>
+  <div class="head-actions">
+    <label class="switch">
+      <input type="checkbox" id="alerts-toggle">
+      <span>Desktop alerts and sound</span>
+    </label>
+    <button class="btn btn-secondary js-trigger" type="button">{{ icon("play") }} <span>Send a test dose</span></button>
+  </div>
+</div>
+<p class="form-status js-trigger-status" role="status"></p>
+
+<ul class="summary" aria-label="Summary">
+  <li class="card summary-card">
+    <span class="summary-icon tone-accent">{{ icon("robot") }}</span>
+    <span class="summary-label">Robot</span>
+    <strong id="caregiver-robot-state" class="summary-value">IDLE</strong>
+    <span id="summary-battery" class="summary-sub">Battery 90%</span>
+  </li>
+  <li class="card summary-card">
+    <span class="summary-icon tone-good">{{ icon("pill") }}</span>
+    <span class="summary-label">Current dose</span>
+    <strong id="summary-dose" class="summary-value">None</strong>
+    <span id="summary-next" class="summary-sub"></span>
+  </li>
+  <li class="card summary-card">
+    <span class="summary-icon tone-accent">{{ icon("calendar") }}</span>
+    <span class="summary-label">Today</span>
+    <strong id="summary-today" class="summary-value">0 taken</strong>
+    <span id="summary-today-sub" class="summary-sub">0 missed · 0 failed</span>
+  </li>
+  <li class="card summary-card" id="summary-alerts-card">
+    <span class="summary-icon tone-warn">{{ icon("bell") }}</span>
+    <span class="summary-label">Alerts</span>
+    <strong id="summary-alerts" class="summary-value">All clear</strong>
+    <button id="summary-open-notifs" class="summary-link" type="button">Open notifications</button>
+  </li>
+</ul>
+
+<div class="tabs" role="tablist" aria-label="Caregiver sections">
+  <button role="tab" id="tab-live" aria-controls="panel-live" aria-selected="true" data-tab="live">
+    {{ icon("activity") }} <span>Live</span>
+  </button>
+  <button role="tab" id="tab-schedules" aria-controls="panel-schedules" aria-selected="false" tabindex="-1" data-tab="schedules">
+    {{ icon("calendar") }} <span>Schedules</span>
+  </button>
+  <button role="tab" id="tab-history" aria-controls="panel-history" aria-selected="false" tabindex="-1" data-tab="history">
+    {{ icon("clock") }} <span>History</span>
+  </button>
+</div>
+
+<!-- Live -->
+<section id="panel-live" class="tab-panel" role="tabpanel" aria-labelledby="tab-live" tabindex="0">
+  <div class="card-grid two">
+    <section class="card" aria-labelledby="cycle-heading">
+      <h2 id="cycle-heading" class="card-title">{{ icon("activity") }} Delivery cycle</h2>
+      <p id="cycle-status" class="cycle-status" aria-live="polite">No active dose</p>
+      <ol class="stepper" aria-label="Delivery steps">
+        <li data-step="0"><span class="step-dot" aria-hidden="true"></span><span class="step-name">Dose due</span><span class="step-state"></span></li>
+        <li data-step="1"><span class="step-dot" aria-hidden="true"></span><span class="step-name">Deliver</span><span class="step-state"></span></li>
+        <li data-step="2"><span class="step-dot" aria-hidden="true"></span><span class="step-name">Alert</span><span class="step-state"></span></li>
+        <li data-step="3"><span class="step-dot" aria-hidden="true"></span><span class="step-name">Detect</span><span class="step-state"></span></li>
+        <li data-step="4"><span class="step-dot" aria-hidden="true"></span><span class="step-name">Return</span><span class="step-state"></span></li>
+      </ol>
+      <p id="failure-path" class="failure-path">
+        {{ icon("alert") }} <span class="step-name">If something goes wrong: caregiver alerted</span>
+        <span class="step-state">Not triggered</span>
+      </p>
+      <p id="queue-info" class="muted"></p>
+    </section>
+
+    <section class="card" aria-labelledby="upcoming-heading">
+      <h2 id="upcoming-heading" class="card-title">{{ icon("clock") }} Queued and upcoming</h2>
+      <ul id="upcoming-list" class="upcoming-list"></ul>
+    </section>
+  </div>
+</section>
+
+<!-- Schedules -->
+<section id="panel-schedules" class="tab-panel" role="tabpanel" aria-labelledby="tab-schedules" tabindex="0" hidden>
+  <div class="card-grid schedules-layout">
+    <section class="card" aria-labelledby="form-heading">
+      <form id="schedule-form" class="schedule-form" novalidate>
+        <h2 id="form-heading" class="card-title">Add a schedule</h2>
+        <div id="form-errors" class="form-errors" role="alert" hidden></div>
+        <div class="field">
+          <label for="f-medication">Medication</label>
+          <input id="f-medication" name="medication" maxlength="100" autocomplete="off" placeholder="e.g. Aspirin 100mg" required>
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label for="f-time">Time</label>
+            <input id="f-time" name="time_hhmm" type="time" required>
+          </div>
+          <div class="field">
+            <label for="f-slot">Dispenser slot</label>
+            <input id="f-slot" name="slot" type="number" min="1" step="1" inputmode="numeric" placeholder="1" required>
+          </div>
+        </div>
+        <fieldset id="f-days" class="days">
+          <legend>Days <span class="hint">(none ticked = every day)</span></legend>
+          <div class="day-chips">
+            <label><input type="checkbox" name="days" value="mon"><span>Mon</span></label>
+            <label><input type="checkbox" name="days" value="tue"><span>Tue</span></label>
+            <label><input type="checkbox" name="days" value="wed"><span>Wed</span></label>
+            <label><input type="checkbox" name="days" value="thu"><span>Thu</span></label>
+            <label><input type="checkbox" name="days" value="fri"><span>Fri</span></label>
+            <label><input type="checkbox" name="days" value="sat"><span>Sat</span></label>
+            <label><input type="checkbox" name="days" value="sun"><span>Sun</span></label>
+          </div>
+        </fieldset>
+        <label class="switch"><input type="checkbox" id="f-enabled" checked> <span>Enabled</span></label>
+        <div class="form-actions">
+          <button id="form-submit" class="btn btn-primary" type="submit">Add schedule</button>
+          <button id="form-cancel" class="btn btn-secondary" type="button" hidden>Cancel edit</button>
+        </div>
+        <p id="form-status" class="form-status" role="status"></p>
+      </form>
+    </section>
+
+    <section class="card" aria-labelledby="schedules-heading">
+      <h2 id="schedules-heading" class="card-title">{{ icon("calendar") }} Current schedules</h2>
+      <p class="muted">Changes apply immediately. Only today's future doses are rebuilt.</p>
+      <ul id="schedule-list" class="schedule-cards"></ul>
+    </section>
+  </div>
+</section>
+
+<!-- History -->
+<section id="panel-history" class="tab-panel" role="tabpanel" aria-labelledby="tab-history" tabindex="0" hidden>
+  <div class="card-grid">
+    <section class="card" aria-labelledby="history-heading">
+      <h2 id="history-heading" class="card-title">{{ icon("list") }} Dose history</h2>
+      <div class="table-wrap">
+        <table class="data-table">
+          <caption class="visually-hidden">Recent doses, most recent first</caption>
+          <thead>
+            <tr><th scope="col">Due</th><th scope="col">Medication</th><th scope="col">Status</th><th scope="col">Reason</th></tr>
+          </thead>
+          <tbody id="history-rows"></tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+</section>
+{% endblock %}

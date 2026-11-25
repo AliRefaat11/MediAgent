@@ -1,6 +1,4 @@
 import argparse
-import json
-import queue
 import sys
 import threading
 import time
@@ -10,41 +8,28 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from backend import db
-from backend.agents import (
-    CAREGIVER_ALERT,
-    DOSE_DONE,
-    DOSE_LOADED,
-    DELIVERY_STARTED,
-    ROBOT_COMMAND,
-    ROBOT_EVENT,
-    ROBOT_STATE,
-    EscalationAgent,
-    DeliveryAgent,
-    ReminderAgent,
-    SchedulingAgent,
-)
 from backend.config import Config, demo_config
-from backend.core import Clock, Context, LocalBus, MqttBus
-from backend.simulator import DispenserSim, RobotSim
-
+from backend.core import Broadcaster, Clock, LocalBus, MqttBus
+from backend.runtime import Runtime
+from backend.simulator import SimDevices
+from backend.validation import ValidationError, validate_schedule
 
 ROOT = Path(__file__).resolve().parent.parent
 DB_PATH = ROOT / "data" / "mediagent.db"
 
-
 def parse_schedule(value):
     try:
         hour_text, minute_text, medication, slot_text = value.split(":")
-        time_hhmm = f"{hour_text}:{minute_text}"
-        hour, minute = (int(part) for part in time_hhmm.split(":"))
-        if not 0 <= hour <= 23 or not 0 <= minute <= 59:
-            raise ValueError
-        return time_hhmm, medication, int(slot_text)
-    except ValueError as exc:
+        # Accept "8:00" on the command line but store a canonical "08:00".
+        time_hhmm = f"{int(hour_text):02d}:{int(minute_text):02d}"
+        clean = validate_schedule(
+            {"medication": medication, "slot": slot_text, "time_hhmm": time_hhmm}
+        )
+        return clean["time_hhmm"], clean["medication"], clean["slot"]
+    except (ValueError, ValidationError) as exc:
         raise argparse.ArgumentTypeError(
             "schedule must be HH:MM:MEDICATION:SLOT"
         ) from exc
-
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="MediAgent medication demo")
@@ -54,11 +39,23 @@ def parse_args(argv=None):
     parser.add_argument("--obstacle-prob", type=float, default=0)
     parser.add_argument("--obstacle-s", type=float, default=6)
     parser.add_argument("--load-fail-prob", type=float, default=0)
-    parser.add_argument("--mqtt", action="store_true")
+    parser.add_argument(
+        "--sim", action="store_true",
+        help="run the simulated dispenser and robot in this process "
+             "(always on without --mqtt; with --mqtt each device gets its own connection and Last Will)",
+    )
+    parser.add_argument(
+        "--mqtt", action="store_true",
+        help="use an MQTT broker; without --sim the devices must be real ESP32s "
+             "or `python -m backend.simulator --mqtt`",
+    )
     parser.add_argument("--host", default="localhost")
+    parser.add_argument("--mqtt-port", type=int, default=1883)
+    parser.add_argument("--confirm-method", choices=("button", "lid"), default="button")
     parser.add_argument("--add-schedule", type=parse_schedule)
     parser.add_argument("--dashboard", action="store_true")
     parser.add_argument("--port", type=int, default=5000)
+    parser.add_argument("--db", type=Path, default=DB_PATH, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     if args.speed is not None and args.speed <= 0:
         parser.error("--speed must be greater than zero")
@@ -69,135 +66,81 @@ def parse_args(argv=None):
         parser.error("--demo-doses cannot be negative")
     return args
 
-
 def run(argv=None):
     args = parse_args(argv)
     speed = args.speed if args.speed is not None else (5 if args.dashboard else 1)
     config = demo_config() if args.dashboard else Config()
-    bus = MqttBus(args.host) if args.mqtt else LocalBus()
     clock = Clock(speed)
-    connection = db.init_db(DB_PATH)
-    context = Context(clock, bus, connection, config)
-    db.generate_today(connection, clock.now())
-
-    if args.add_schedule:
-        time_hhmm, medication, slot = args.add_schedule
-        db.add_schedule(connection, medication, slot, time_hhmm)
-        db.generate_today(connection, clock.now())
-    for _ in range(args.demo_doses):
-        db.create_dose_now(connection, "Aspirin 100mg", 1, clock.now())
-
-    agents = [
-        SchedulingAgent(context),
-        DeliveryAgent(context),
-        ReminderAgent(context),
-        EscalationAgent(context),
-    ]
-    dispenser = DispenserSim(context, args.load_fail_prob)
-    robot = RobotSim(
-        context,
+    bus = MqttBus(args.host, args.mqtt_port, client_id="mediagent-agents") if args.mqtt else LocalBus()
+    sim_kwargs = dict(
         confirm_prob=0 if args.dashboard else args.confirm_prob,
         obstacle_prob=args.obstacle_prob,
         obstacle_s=args.obstacle_s,
+        load_fail_prob=args.load_fail_prob,
+        confirm_method=args.confirm_method,
     )
-    snapshot = {
-        "robot_state": "IDLE",
-        "battery": 90.0,
-        "active_dose": None,
-        "alert_on": False,
-        "alert_text": "",
-        "alerts": [],
-    }
-    control_queue = queue.Queue()
+    if not args.mqtt:
+        devices = None  # simulated devices on the in-process LocalBus
+    elif args.sim:
+        devices = SimDevices.over_mqtt(args.host, args.mqtt_port, clock, **sim_kwargs)
+    else:
+        devices = False
+        print("Waiting for devices on MQTT (real hardware or `python -m backend.simulator --mqtt`)")
+    connection = db.init_db(args.db)
 
-    def replace_snapshot(**changes):
-        nonlocal snapshot
-        snapshot = {**snapshot, **changes}
+    # Startup writes happen before the dashboard thread exists, so the main
+    # thread is still the only DB writer. Today's doses are generated by
+    # SchedulingAgent on its first tick (and again at every midnight).
+    if args.add_schedule:
+        time_hhmm, medication, slot = args.add_schedule
+        schedule_id, created = db.ensure_schedule(connection, medication, slot, time_hhmm)
+        print(
+            f"{'Added' if created else 'Schedule already exists:'} "
+            f"#{schedule_id} {time_hhmm} {medication} slot {slot}"
+        )
+    for _ in range(args.demo_doses):
+        db.create_dose_now(connection, "Aspirin 100mg", 1, clock.now())
 
-    def log_message(topic, payload):
-        now = clock.now()
-        dose_id = payload.get("dose_id")
-        kind = topic.rsplit("/", 1)[-1]
-        state_changed = topic != ROBOT_STATE or payload["state"] != snapshot["robot_state"]
-        if topic != ROBOT_STATE or state_changed:
-            db.log_event(connection, now, dose_id, kind, json.dumps(payload))
-            print(f"[{now:.1f}] {topic}: {payload}")
-        if topic == DOSE_LOADED or topic == DELIVERY_STARTED:
-            dose = db.get_dose(connection, dose_id)
-            if topic == DELIVERY_STARTED:
-                db.set_status(connection, dose_id, "active")
-            replace_snapshot(
-                active_dose={
-                    "id": dose_id,
-                    "medication": payload.get(
-                        "medication", dose["medication"] if dose else "Medication"
-                    ),
-                }
-            )
-        elif topic == DOSE_DONE:
-            db.set_status(connection, dose_id, payload["result"])
-            replace_snapshot(active_dose=None)
-        elif topic == CAREGIVER_ALERT:
-            alerts = [*snapshot["alerts"], payload][-20:]
-            replace_snapshot(alerts=alerts)
-        elif topic == ROBOT_STATE:
-            replace_snapshot(
-                robot_state=payload["state"], battery=payload["battery"]
-            )
-        elif topic == ROBOT_COMMAND and payload["action"] == "alert":
-            replace_snapshot(
-                alert_on=payload["on"], alert_text=payload.get("text", "")
-            )
-
-    log_topics = (
-        "mediagent/agents/dose_loaded",
-        DELIVERY_STARTED,
-        "mediagent/agents/arrived",
-        DOSE_DONE,
-        "mediagent/agents/failure",
-        CAREGIVER_ALERT,
-        ROBOT_STATE,
-        ROBOT_COMMAND,
-        ROBOT_EVENT,
+    broadcaster = Broadcaster()
+    runtime = Runtime(
+        connection,
+        config,
+        clock,
+        bus,
+        broadcaster=broadcaster,
+        devices=devices,
+        verbose=True,
+        **sim_kwargs,
     )
-    for topic in log_topics:
-        bus.subscribe(topic, lambda payload, topic=topic: log_message(topic, payload))
 
     if args.dashboard:
         from dashboard.app import create_app
 
-        app = create_app(lambda: snapshot, control_queue, DB_PATH)
+        app = create_app(runtime.get_snapshot, runtime.control_queue, args.db, broadcaster)
         threading.Thread(
             target=app.run,
-            kwargs={"host": "127.0.0.1", "port": args.port, "use_reloader": False},
+            kwargs={
+                "host": "127.0.0.1",
+                "port": args.port,
+                "use_reloader": False,
+                "threaded": True,
+            },
             daemon=True,
         ).start()
         print(f"Dashboard: http://localhost:{args.port}")
 
     try:
         while True:
-            now = clock.now()
-            bus.pump()
-            for agent in agents:
-                agent.tick(now)
-            dispenser.tick(now)
-            robot.tick(now)
-            while True:
-                try:
-                    command = control_queue.get_nowait()
-                except queue.Empty:
-                    break
-                if command == "trigger_dose":
-                    db.create_dose_now(connection, "Aspirin 100mg", 1, now)
-                elif command == "confirm" and robot.state == "WAITING_CONFIRM":
-                    robot.press_confirm()
-            bus.pump()
+            runtime.step(clock.now())
             time.sleep(0.05)
     except KeyboardInterrupt:
         print("MediAgent stopped.")
     finally:
+        if runtime.devices:
+            runtime.devices.close(clock)
+        if isinstance(bus, MqttBus):
+            bus.close()
         connection.close()
-
 
 if __name__ == "__main__":
     run()

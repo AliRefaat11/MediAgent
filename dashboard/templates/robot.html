@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% from "_icons.html" import icon %}
+{% block title %}Robot{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>Robot</h1>
+  <p class="lead">Live telemetry from the simulated delivery robot.</p>
+</div>
+
+<div class="card-grid robot-grid">
+  <section class="card stat-card" aria-labelledby="robot-status-h">
+    <h2 id="robot-status-h" class="card-label">{{ icon("activity") }} Status</h2>
+    <p id="robot-state" class="stat-big">IDLE</p>
+    <p id="robot-state-text" class="stat-sub">Waiting at the dock</p>
+  </section>
+  <section class="card stat-card" aria-labelledby="robot-battery-h">
+    <h2 id="robot-battery-h" class="card-label">{{ icon("battery") }} Battery</h2>
+    <p id="battery" class="stat-big">90%</p>
+    <div class="meter" role="presentation"><div id="battery-bar" class="meter-fill"></div></div>
+    <p id="battery-text" class="stat-sub">Good</p>
+  </section>
+  <section class="card stat-card" aria-labelledby="robot-task-h">
+    <h2 id="robot-task-h" class="card-label">{{ icon("pill") }} Current task</h2>
+    <p id="robot-task" class="stat-mid">No task</p>
+    <p id="robot-task-stage" class="stat-sub"></p>
+  </section>
+  <section class="card stat-card" aria-labelledby="robot-screen-h">
+    <h2 id="robot-screen-h" class="card-label">{{ icon("monitor") }} Robot screen</h2>
+    <div id="robot-screen" class="robot-screen" data-on="false">Screen off</div>
+  </section>
+</div>
+
+<section class="card" aria-labelledby="route-h">
+  <h2 id="route-h" class="card-title">{{ icon("map") }} Route</h2>
+  <ol id="state-sequence" class="route">
+    <li data-state="IDLE"><span class="route-dot" aria-hidden="true"></span>Idle</li>
+    <li data-state="DELIVERING"><span class="route-dot" aria-hidden="true"></span>Delivering</li>
+    <li data-state="WAITING_CONFIRM"><span class="route-dot" aria-hidden="true"></span>Waiting for confirmation</li>
+    <li data-state="RETURNING"><span class="route-dot" aria-hidden="true"></span>Returning</li>
+    <li data-state="CHARGING"><span class="route-dot" aria-hidden="true"></span>Charging</li>
+    <li data-state="EMERGENCY_STOP"><span class="route-dot" aria-hidden="true"></span>Emergency stop</li>
+  </ol>
+</section>
+
+<div class="card-grid two">
+  <section class="card" aria-labelledby="sim-h">
+    <h2 id="sim-h" class="card-title">{{ icon("play") }} Simulation controls</h2>
+    <p class="muted">Start a one-off dose of Aspirin 100mg from slot 1 right now.</p>
+    <button class="btn btn-primary js-trigger" type="button">{{ icon("play") }} <span>Trigger dose now</span></button>
+    <p class="form-status js-trigger-status" role="status"></p>
+    <p class="muted">Simulated hardware: the same actions the real sensors and buttons will cause.</p>
+    <div class="sim-buttons">
+      <button class="btn btn-ghost btn-small js-sim" type="button" data-device="robot" data-action="open_lid">Open tray lid</button>
+      <button class="btn btn-ghost btn-small js-sim" type="button" data-device="robot" data-action="estop">Emergency stop</button>
+      <button class="btn btn-ghost btn-small js-sim" type="button" data-device="robot" data-action="release_estop">Release e-stop</button>
+      <button class="btn btn-ghost btn-small js-sim" type="button" data-device="robot" data-action="lost_line">Lose the line</button>
+      <button class="btn btn-ghost btn-small js-sim" type="button" data-device="robot" data-action="set_battery" data-value="20">Battery 20%</button>
+      <button class="btn btn-ghost btn-small js-sim" type="button" data-device="robot" data-action="set_battery" data-value="90">Battery 90%</button>
+      <button class="btn btn-ghost btn-small js-sim" type="button" data-device="robot" data-action="heartbeat_off">Cut robot heartbeat</button>
+      <button class="btn btn-ghost btn-small js-sim" type="button" data-device="robot" data-action="heartbeat_on">Restore robot heartbeat</button>
+      <button class="btn btn-ghost btn-small js-sim" type="button" data-device="dispenser" data-action="heartbeat_off">Cut dispenser heartbeat</button>
+      <button class="btn btn-ghost btn-small js-sim" type="button" data-device="dispenser" data-action="heartbeat_on">Restore dispenser heartbeat</button>
+    </div>
+    <p class="form-status js-sim-status" role="status"></p>
+  </section>
+  <section class="card" aria-labelledby="log-h">
+    <h2 id="log-h" class="card-title">{{ icon("list") }} Activity log</h2>
+    <ol id="event-log" class="event-log"></ol>
+  </section>
+</div>
+{% endblock %}

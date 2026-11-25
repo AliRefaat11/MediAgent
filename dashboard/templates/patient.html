@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% from "_icons.html" import icon %}
+{% block title %}Patient{% endblock %}
+{% block content %}
+<h1 class="visually-hidden">Patient</h1>
+<section id="patient-card" class="patient-card" data-mode="idle" aria-labelledby="patient-title">
+  <span class="patient-icon" aria-hidden="true">{{ icon("pill", "icon icon-xl") }}</span>
+  <div aria-live="polite" aria-atomic="true">
+    <h2 id="patient-title" class="patient-title">No medicine right now</h2>
+    <p id="patient-message" class="patient-message">You can relax. We will tell you when it is time.</p>
+  </div>
+  <p id="medicine" class="patient-med" hidden></p>
+  <button id="confirm-button" class="btn btn-primary btn-huge" type="button" disabled>
+    {{ icon("check", "icon icon-lg") }} <span>I took my medicine</span>
+  </button>
+  <p id="patient-next" class="patient-next"></p>
+</section>
+{% endblock %}
