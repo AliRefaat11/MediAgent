@@ -6,13 +6,13 @@ The dispenser and robot are **SIMULATED**; nothing was tested on real hardware.
 ## Install and run
 Requires Python 3.10+.
 Install: `python3 -m venv .venv` then `.venv/bin/pip install -r requirements.txt` (Windows: `py -3.10 -m venv .venv`, then `.venv\Scripts\pip`).
-Run: `.venv/bin/python backend/main.py --dashboard --speed 5` (Windows: `.venv\Scripts\python backend\main.py --dashboard --speed 5`).
+Run: `.venv/bin/python backend/main.py --dashboard` (Windows: `.venv\Scripts\python backend\main.py --dashboard`).
 Open http://localhost:5000.
 
 Add a daily schedule at startup with `--add-schedule 08:00:Aspirin:1`. This is idempotent: running it again does not create a duplicate row.
 
-Scenario 1: on the Caregiver or Robot page click **Send a test dose** / **Trigger dose now**, then on the Patient page press **I took my medicine** when prompted.
-Scenario 2: trigger a dose and do nothing. Reminders repeat, then a critical caregiver notification appears and repeats until it is acknowledged.
+Scenario 1: on the Caregiver page's **Schedules** tab add a schedule a minute or two from now. When it is due the dose is loaded and delivered automatically; on the Patient page press **I took my medicine** when prompted.
+Scenario 2: let a scheduled dose arrive and do nothing. Reminders repeat, then a critical caregiver notification appears and repeats until it is acknowledged.
 Scenario 3: on the Robot page use the simulation buttons (open tray lid, emergency stop, lose the line, low battery, cut a heartbeat) to see each failure path.
 
 ### Run modes
@@ -67,7 +67,7 @@ Notification toasts, sound and desktop alerts appear only on the caregiver page.
 | GET | `/doses` | `?status=taken,missed,failed&limit=50&order=desc`; includes `reason` |
 | GET | `/notifications` | Last 50, with `acked` |
 | POST | `/notifications/<id>/ack` | Acknowledge a notification |
-| POST | `/trigger`, `/confirm` | Demo controls |
+| POST | `/confirm` | Patient confirmation (stands in for the robot's button) |
 
 Invalid input returns `400` with `{"errors": {field: message}}`, and an unknown id returns `404`. Flask never writes the database. Writes go to the main loop through `control_queue` (a single DB writer), which then publishes `mediagent/schedule/changed` on the bus.
 

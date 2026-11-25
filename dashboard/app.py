@@ -177,11 +177,6 @@ def create_app(
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
-    @app.post("/trigger")
-    def trigger():
-        control_queue.put("trigger_dose")
-        return jsonify({"ok": True})
-
     @app.post("/confirm")
     def confirm():
         control_queue.put("confirm")

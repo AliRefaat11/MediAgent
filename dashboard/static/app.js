@@ -411,7 +411,8 @@ async function acknowledge(id) {
     if (focusWasInPanel) ($("#notification-list .btn") ?? panel).focus();
   } catch (error) {
     console.error(error);
-    $$(".js-trigger-status").forEach((node) => setText(node, `Could not acknowledge: ${Object.values(error.errors).join("; ")}`));
+    const detail = error?.errors ? Object.values(error.errors).join("; ") : "server unreachable";
+    $$(".js-ack-status").forEach((node) => setText(node, `Could not acknowledge: ${detail}`));
   }
 }
 
@@ -910,23 +911,6 @@ function connectStream() {
 // ----------------------------------------------------------------- controls
 
 function initControls() {
-  $$(".js-trigger").forEach((button) => {
-    button.addEventListener("click", async () => {
-      button.disabled = true;
-      try {
-        await api("/trigger", { method: "POST" });
-        $$(".js-trigger-status").forEach((node) => setText(node, "Dose sent. Watch it move through the steps."));
-      } catch (error) {
-        $$(".js-trigger-status").forEach((node) => setText(node, "Could not trigger a dose."));
-        console.error(error);
-      } finally {
-        setTimeout(() => {
-          button.disabled = false;
-        }, 1500);
-      }
-    });
-  });
-
   $$(".js-sim").forEach((button) => {
     button.addEventListener("click", async () => {
       const { device, action, value } = button.dataset;

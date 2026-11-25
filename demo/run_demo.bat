@@ -8,4 +8,4 @@ if errorlevel 1 (
 if not exist .venv\Scripts\python.exe python -m venv .venv
 .venv\Scripts\python.exe -m pip install -r requirements.txt
 echo Open http://localhost:5000
-.venv\Scripts\python.exe backend\main.py --dashboard --speed 5
+.venv\Scripts\python.exe backend\main.py --dashboard
