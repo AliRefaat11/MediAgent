@@ -17,7 +17,7 @@ from backend.agents import (
 )
 from backend.config import Config
 from backend.core import Broadcaster
-from backend.main import parse_schedule
+from backend.main import parse_args, parse_schedule
 from backend.runtime import Runtime
 from backend.validation import ValidationError, validate_schedule
 from dashboard.app import create_app
@@ -289,6 +289,11 @@ class AgentFixTests(RuntimeTestCase):
         self.assertEqual(first[0], second[0])
         self.assertEqual(connection.execute("SELECT COUNT(*) FROM schedules").fetchone()[0], 1)
 
+    def test_dashboard_runs_on_real_time_by_default(self):
+        # Schedules are wall-clock times; a faster clock would fire them early.
+        self.assertEqual(parse_args(["--dashboard"]).speed, 1)
+        self.assertEqual(parse_args([]).speed, 1)
+
     def test_migration_adds_enabled_and_days_columns(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -364,6 +369,24 @@ class ScheduleCommandTests(RuntimeTestCase):
         )
         bad = self.command(runtime, type="schedule_create", data={"medication": "", "slot": 1, "time_hhmm": "8"})
         self.assertEqual(bad["status"], 400)
+
+    def test_upcoming_scheduled_dose_starts_without_trigger(self):
+        runtime, connection = self.make_runtime()
+        runtime.step(self.clock.now())
+        result = self.command(
+            runtime,
+            type="schedule_create",
+            data={"medication": "Concor", "slot": 1, "time_hhmm": "12:02", "days": [], "enabled": True},
+        )
+        dose = connection.execute(
+            "SELECT * FROM doses WHERE schedule_id = ?", (result["schedule"]["id"],)
+        ).fetchone()
+        self.assertEqual(dose["due_ts"], local_ts(TODAY, 12, 2))
+        self.advance(runtime, 100)  # still before 12:02: nothing happens yet
+        self.assertEqual(self.status(connection, dose["id"]), "pending")
+        started = self.advance(runtime, 60, lambda: self.status(connection, dose["id"]) == "active")
+        self.assertTrue(started)
+        self.assertGreaterEqual(self.clock.now(), local_ts(TODAY, 12, 2))
 
     def test_rebuild_never_touches_active_or_past_doses(self):
         runtime, connection = self.make_runtime()
@@ -504,7 +527,9 @@ class DashboardApiTests(RuntimeTestCase):
         self.assertEqual(self.client.put("/schedules/1", json={"slot": 2}).status_code, 404)
 
     def test_doses_history_ack_and_state(self):
-        self.assertEqual(self.client.post("/trigger").status_code, 200)
+        response = self.client.post("/schedules", json={"medication": "Aspirin", "slot": 1, "time_hhmm": "12:02"})
+        self.assertEqual(response.status_code, 201, response.get_json())
+        self.assertEqual(self.client.post("/trigger").status_code, 404)  # doses come from schedules only
         deadline = time.monotonic() + 10
         history = []
         while time.monotonic() < deadline:

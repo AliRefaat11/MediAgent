@@ -10,4 +10,4 @@ if [ ! -d .venv ]; then
 fi
 .venv/bin/python -m pip install -r requirements.txt
 echo "Open http://localhost:5000"
-exec .venv/bin/python backend/main.py --dashboard --speed 5
+exec .venv/bin/python backend/main.py --dashboard

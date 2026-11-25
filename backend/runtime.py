@@ -380,10 +380,6 @@ class Runtime:
                 command = self.control_queue.get_nowait()
             except queue.Empty:
                 return
-            if command == "trigger_dose":
-                db.create_dose_now(self.connection, "Aspirin 100mg", 1, now)
-                self.broadcaster.publish("doses", {})
-                continue
             if command == "confirm":
                 # The patient page's button stands in for the robot's button.
                 self.out.send(SIM_CONTROL, {"device": "robot", "action": "press_button"})

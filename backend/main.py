@@ -33,8 +33,12 @@ def parse_schedule(value):
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="MediAgent medication demo")
-    parser.add_argument("--speed", type=float)
-    parser.add_argument("--demo-doses", type=int, default=0)
+    parser.add_argument(
+        "--speed", type=float, default=1.0,
+        help="simulated-time multiplier (default 1 = real time). Schedules follow "
+             "this clock, so with --speed > 1 a 'HH:MM' schedule no longer fires "
+             "at that wall-clock time; use it only for quick failure-path tests.",
+    )
     parser.add_argument("--confirm-prob", type=float, default=0.5)
     parser.add_argument("--obstacle-prob", type=float, default=0)
     parser.add_argument("--obstacle-s", type=float, default=6)
@@ -57,20 +61,22 @@ def parse_args(argv=None):
     parser.add_argument("--port", type=int, default=5000)
     parser.add_argument("--db", type=Path, default=DB_PATH, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
-    if args.speed is not None and args.speed <= 0:
+    if args.speed <= 0:
         parser.error("--speed must be greater than zero")
     for name in ("confirm_prob", "obstacle_prob", "load_fail_prob"):
         if not 0 <= getattr(args, name) <= 1:
             parser.error(f"--{name.replace('_', '-')} must be between 0 and 1")
-    if args.demo_doses < 0:
-        parser.error("--demo-doses cannot be negative")
     return args
 
 def run(argv=None):
     args = parse_args(argv)
-    speed = args.speed if args.speed is not None else (5 if args.dashboard else 1)
     config = demo_config() if args.dashboard else Config()
-    clock = Clock(speed)
+    clock = Clock(args.speed)
+    if args.speed != 1:
+        print(
+            f"Warning: --speed {args.speed:g} runs the agents' clock faster than real time; "
+            "scheduled doses will not fire at their wall-clock times."
+        )
     bus = MqttBus(args.host, args.mqtt_port, client_id="mediagent-agents") if args.mqtt else LocalBus()
     sim_kwargs = dict(
         confirm_prob=0 if args.dashboard else args.confirm_prob,
@@ -98,8 +104,6 @@ def run(argv=None):
             f"{'Added' if created else 'Schedule already exists:'} "
             f"#{schedule_id} {time_hhmm} {medication} slot {slot}"
         )
-    for _ in range(args.demo_doses):
-        db.create_dose_now(connection, "Aspirin 100mg", 1, clock.now())
 
     broadcaster = Broadcaster()
     runtime = Runtime(

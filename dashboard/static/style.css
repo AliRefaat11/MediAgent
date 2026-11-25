@@ -50,7 +50,6 @@ a { color: var(--accent); }
 }
 .brand { display: inline-flex; align-items: center; gap: 10px; color: var(--text); text-decoration: none; font-size: 1.15rem; font-weight: 800; }
 .brand-icon { color: var(--good); width: 1.5em; height: 1.5em; }
-.sim-tag { padding: 2px 8px; color: var(--bg); background: var(--warn); border-radius: 999px; font-size: .6rem; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
 .nav { flex: 1; }
 .nav ul { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0; list-style: none; }
 .nav a {
